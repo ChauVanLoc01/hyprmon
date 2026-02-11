@@ -48,6 +48,8 @@ sudo cp target/release/hyprmon /usr/local/bin/
 hyprmon
 ```
 
+Or search "Hyprmon" in your app launcher (Walker, Rofi, Wofi, etc.).
+
 ### Keyboard Controls
 
 | Key | Action |
