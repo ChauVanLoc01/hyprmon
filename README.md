@@ -23,6 +23,14 @@ A terminal user interface (TUI) for managing Hyprland monitor configurations.
 
 ## Installation
 
+### Arch Linux (AUR)
+
+```bash
+paru -S hyprmon
+# or
+yay -S hyprmon
+```
+
 ### From Source
 
 Requires Rust 1.70 or later.
@@ -31,19 +39,6 @@ Requires Rust 1.70 or later.
 git clone https://github.com/ChauVanLoc01/hyprmon.git
 cd hyprmon
 cargo build --release
-```
-
-The binary will be at `target/release/hyprmon`.
-
-### Install to PATH
-
-```bash
-cargo install --path .
-```
-
-Or copy manually:
-
-```bash
 sudo cp target/release/hyprmon /usr/local/bin/
 ```
 
