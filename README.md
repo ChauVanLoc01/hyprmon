@@ -15,9 +15,11 @@ A terminal user interface (TUI) for managing Hyprland monitor configurations.
 - **Mouse & Keyboard** - Full support for both input methods
 - **Lightweight** - Optimized binary ~775KB
 
-## Screenshot
+## Screenshots
 
-![hyprmon](screenshots/hyprmon.png)
+| Live Tab | Saved Tab |
+|----------|-----------|
+| ![Live](screenshots/hyprmon.png) | ![Saved](screenshots/hyprmon-saved.png) |
 
 ## Installation
 
