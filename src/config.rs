@@ -94,12 +94,12 @@ impl MonitorDatabase {
         Ok(())
     }
 
-    /// Get the identifier key for a monitor (desc:Make Model or eDP-1 for laptops)
+    /// Get the identifier key for a monitor (desc:Description or eDP-1 for laptops)
     pub fn get_monitor_key(monitor: &MonitorConfig) -> String {
         if monitor.name.starts_with("eDP") {
             monitor.name.clone()
         } else {
-            format!("desc:{} {}", monitor.make, monitor.model)
+            format!("desc:{}", monitor.description)
         }
     }
 
@@ -216,16 +216,33 @@ impl MonitorDatabase {
 
         for (key, saved) in &all_monitors {
             let transform = saved.rotation;
-            config.push_str(&format!(
-                "monitor={},{}@{:.2},{}x{},{:.2},transform,{}\n",
-                key,
-                saved.resolution,
-                saved.refresh_rate,
-                saved.position_x,
-                saved.position_y,
-                saved.scale,
-                transform
-            ));
+            let scale = if saved.scale.fract() == 0.0 {
+                format!("{}", saved.scale as i32)
+            } else {
+                format!("{:.2}", saved.scale)
+            };
+            if transform == 0 {
+                config.push_str(&format!(
+                    "monitor={},{}@{:.2},{}x{},{}\n",
+                    key,
+                    saved.resolution,
+                    saved.refresh_rate,
+                    saved.position_x,
+                    saved.position_y,
+                    scale
+                ));
+            } else {
+                config.push_str(&format!(
+                    "monitor={},{}@{:.2},{}x{},{},transform,{}\n",
+                    key,
+                    saved.resolution,
+                    saved.refresh_rate,
+                    saved.position_x,
+                    saved.position_y,
+                    scale,
+                    transform
+                ));
+            }
         }
 
         config.push_str("\n# Fallback for unknown monitors\nmonitor=,preferred,auto,1\n");
@@ -241,18 +258,19 @@ impl MonitorDatabase {
         ws.monitors
             .iter()
             .map(|(key, saved)| {
-                let (name, make, model) = if key.starts_with("desc:") {
-                    let desc = key.strip_prefix("desc:").unwrap_or(key);
-                    let parts: Vec<&str> = desc.splitn(2, ' ').collect();
-                    let make = parts.first().unwrap_or(&"").to_string();
-                    let model = parts.get(1).unwrap_or(&"").to_string();
-                    (key.clone(), make, model)
+                let (name, description, make, model) = if key.starts_with("desc:") {
+                    let desc = key.strip_prefix("desc:").unwrap_or(key).to_string();
+                    let parts: Vec<&str> = desc.rsplitn(2, ' ').collect();
+                    let model = parts.first().unwrap_or(&"").to_string();
+                    let make = parts.get(1).unwrap_or(&"").to_string();
+                    (key.clone(), desc, make, model)
                 } else {
-                    (key.clone(), String::new(), key.clone())
+                    (key.clone(), String::new(), String::new(), key.clone())
                 };
 
                 MonitorConfig {
                     name,
+                    description,
                     make,
                     model,
                     resolution: saved.resolution.clone(),

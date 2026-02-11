@@ -24,6 +24,7 @@ pub struct HyprMonitor {
 #[derive(Debug, Clone)]
 pub struct MonitorConfig {
     pub name: String,
+    pub description: String,
     pub make: String,
     pub model: String,
     pub resolution: String,
@@ -98,18 +99,26 @@ pub fn fetch_monitors() -> Result<Vec<MonitorConfig>> {
 
     let mut monitors: Vec<MonitorConfig> = hypr_monitors
         .iter()
-        .map(|m| MonitorConfig {
-            name: m.name.clone(),
-            make: m.make.clone(),
-            model: m.model.clone(),
-            resolution: format!("{}x{}", m.width, m.height),
-            refresh_rate: m.refresh_rate,
-            position_x: m.x,
-            position_y: m.y,
-            scale: m.scale,
-            rotation: Rotation::from_transform(m.transform as u8),
-            is_primary: m.focused,
-            available_modes: m.available_modes.clone(),
+        .map(|m| {
+            let desc = m
+                .description
+                .strip_suffix(&format!(" ({})", m.name))
+                .unwrap_or(&m.description)
+                .to_string();
+            MonitorConfig {
+                name: m.name.clone(),
+                description: desc,
+                make: m.make.clone(),
+                model: m.model.clone(),
+                resolution: format!("{}x{}", m.width, m.height),
+                refresh_rate: m.refresh_rate,
+                position_x: m.x,
+                position_y: m.y,
+                scale: m.scale,
+                rotation: Rotation::from_transform(m.transform as u8),
+                is_primary: m.focused,
+                available_modes: m.available_modes.clone(),
+            }
         })
         .collect();
 

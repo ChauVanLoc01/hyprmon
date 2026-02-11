@@ -367,22 +367,40 @@ impl App {
             let identifier = if is_laptop {
                 monitor.name.clone()
             } else {
-                format!("desc:{} {}", monitor.make, monitor.model)
+                format!("desc:{}", monitor.description)
             };
 
             let transform = monitor.rotation.transform();
+            let scale = if monitor.scale.fract() == 0.0 {
+                format!("{}", monitor.scale as i32)
+            } else {
+                format!("{:.2}", monitor.scale)
+            };
 
-            config.push_str(&format!(
-                "# {}\nmonitor={},{}@{:.2},{}x{},{:.2},transform,{}\n\n",
-                monitor.model,
-                identifier,
-                monitor.resolution,
-                monitor.refresh_rate,
-                monitor.position_x,
-                monitor.position_y,
-                monitor.scale,
-                transform
-            ));
+            if transform == 0 {
+                config.push_str(&format!(
+                    "# {}\nmonitor={},{}@{:.2},{}x{},{}\n\n",
+                    monitor.model,
+                    identifier,
+                    monitor.resolution,
+                    monitor.refresh_rate,
+                    monitor.position_x,
+                    monitor.position_y,
+                    scale
+                ));
+            } else {
+                config.push_str(&format!(
+                    "# {}\nmonitor={},{}@{:.2},{}x{},{},transform,{}\n\n",
+                    monitor.model,
+                    identifier,
+                    monitor.resolution,
+                    monitor.refresh_rate,
+                    monitor.position_x,
+                    monitor.position_y,
+                    scale,
+                    transform
+                ));
+            }
         }
 
         config.push_str("# Fallback\nmonitor=,preferred,auto,1\n");
