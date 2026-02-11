@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Hyprmon
+Comment=TUI for Hyprland monitor configuration
+Exec=hyprmon
+Icon=preferences-desktop-display
+Terminal=true
+Type=Application
+Categories=Settings;HardwareSettings;
+Keywords=monitor;display;screen;hyprland;
