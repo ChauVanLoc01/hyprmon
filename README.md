@@ -15,26 +15,9 @@ A terminal user interface (TUI) for managing Hyprland monitor configurations.
 - **Mouse & Keyboard** - Full support for both input methods
 - **Lightweight** - Optimized binary ~775KB
 
-## Screenshots
+## Screenshot
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  [Live]  Saved                                              │
-├─────────────────────────────────────────────────────────────┤
-│  ┌──────────────┐  ┌──────────────┐                        │
-│  │   Monitor 1  │  │   Monitor 2  │                        │
-│  │  2560x1440   │  │  1920x1080   │                        │
-│  └──────────────┘  └──────────────┘                        │
-├─────────────────────────────────────────────────────────────┤
-│  Resolution:    2560x1440  ▼                               │
-│  Refresh Rate:  144Hz      ▼                               │
-│  Scale:         100%       ▼                               │
-│  Rotation:      Normal     ▼                               │
-│  Primary:       ✓                                          │
-├─────────────────────────────────────────────────────────────┤
-│  ←/→ Move  Tab: Switch  Enter: Edit  A: Apply  Q: Quit    │
-└─────────────────────────────────────────────────────────────┘
-```
+![hyprmon](screenshots/hyprmon.png)
 
 ## Installation
 
