@@ -95,7 +95,13 @@ impl MonitorConfig {
 
 pub fn fetch_monitors() -> Result<Vec<MonitorConfig>> {
     let output = Command::new("hyprctl").args(["monitors", "-j"]).output()?;
-    let hypr_monitors: Vec<HyprMonitor> = serde_json::from_slice(&output.stdout)?;
+    parse_monitors(&output.stdout)
+}
+
+/// Parse `hyprctl monitors -j` output into sorted [`MonitorConfig`]s. Split from
+/// the subprocess call so the mapping/sort/primary-fallback logic is unit-testable.
+pub fn parse_monitors(json: &[u8]) -> Result<Vec<MonitorConfig>> {
+    let hypr_monitors: Vec<HyprMonitor> = serde_json::from_slice(json)?;
 
     let mut monitors: Vec<MonitorConfig> = hypr_monitors
         .iter()
@@ -148,5 +154,113 @@ pub fn identify_monitors(monitors: &[MonitorConfig]) {
                 &format!("fontsize:40 {}", msg),
             ])
             .spawn();
+    }
+}
+
+#[cfg(test)]
+impl MonitorConfig {
+    /// Build a representative monitor for tests across modules.
+    pub fn for_test(name: &str, make: &str, model: &str, resolution: &str) -> Self {
+        Self {
+            name: name.into(),
+            description: format!("{make} {model}").trim().to_string(),
+            make: make.into(),
+            model: model.into(),
+            resolution: resolution.into(),
+            refresh_rate: 60.0,
+            position_x: 0,
+            position_y: 0,
+            scale: 1.0,
+            rotation: Rotation::Normal,
+            is_primary: false,
+            available_modes: vec![
+                "1920x1080@60.00Hz".into(),
+                "1920x1080@144.00Hz".into(),
+                "2560x1440@60.00Hz".into(),
+            ],
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rotation_transform_round_trips() {
+        for r in Rotation::all() {
+            assert_eq!(Rotation::from_transform(r.transform()), r);
+        }
+    }
+
+    #[test]
+    fn rotation_from_transform_maps_known_and_falls_back() {
+        assert_eq!(Rotation::from_transform(0u8), Rotation::Normal);
+        assert_eq!(Rotation::from_transform(1u8), Rotation::Left);
+        assert_eq!(Rotation::from_transform(2u8), Rotation::Inverted);
+        assert_eq!(Rotation::from_transform(3u8), Rotation::Right);
+        assert_eq!(Rotation::from_transform(9u8), Rotation::Normal); // unknown -> Normal
+    }
+
+    #[test]
+    fn rotation_as_str_and_all() {
+        assert_eq!(Rotation::Normal.as_str(), "Landscape");
+        assert_eq!(Rotation::Left.as_str(), "Portrait Left");
+        assert_eq!(Rotation::Right.as_str(), "Portrait Right");
+        assert_eq!(Rotation::Inverted.as_str(), "Inverted");
+        assert_eq!(Rotation::all().len(), 4);
+    }
+
+    fn mc(name: &str, model: &str) -> MonitorConfig {
+        MonitorConfig {
+            name: name.into(),
+            description: String::new(),
+            make: String::new(),
+            model: model.into(),
+            resolution: "1920x1080".into(),
+            refresh_rate: 60.0,
+            position_x: 0,
+            position_y: 0,
+            scale: 1.0,
+            rotation: Rotation::Normal,
+            is_primary: false,
+            available_modes: vec![],
+        }
+    }
+
+    #[test]
+    fn display_name_uses_laptop_for_edp_else_model() {
+        assert_eq!(mc("eDP-1", "0x004D").display_name(), "Laptop");
+        assert_eq!(mc("HDMI-A-1", "MSI MP275Q").display_name(), "MSI MP275Q");
+    }
+
+    #[test]
+    fn parse_monitors_sorts_strips_desc_and_defaults_primary() {
+        let json = br#"[
+            {"name":"HDMI-A-1","description":"Microstep MSI MP275Q (HDMI-A-1)","make":"Microstep","model":"MSI MP275Q","width":2560,"height":1440,"refreshRate":99.95,"x":1920,"y":0,"scale":1.0,"transform":0,"availableModes":["2560x1440@99.95Hz"],"focused":false},
+            {"name":"eDP-1","description":"Najing 0x004D (eDP-1)","make":"Najing","model":"0x004D","width":1920,"height":1080,"refreshRate":144.0,"x":0,"y":0,"scale":1.5,"transform":1,"availableModes":["1920x1080@144Hz"],"focused":false}
+        ]"#;
+        let monitors = parse_monitors(json).unwrap();
+        assert_eq!(monitors.len(), 2);
+        // sorted by x: eDP (0) first
+        assert_eq!(monitors[0].name, "eDP-1");
+        assert_eq!(monitors[1].name, "HDMI-A-1");
+        // " (name)" suffix stripped from description
+        assert_eq!(monitors[0].description, "Najing 0x004D");
+        assert_eq!(monitors[1].description, "Microstep MSI MP275Q");
+        // resolution composed, rotation from transform
+        assert_eq!(monitors[1].resolution, "2560x1440");
+        assert_eq!(monitors[0].rotation, Rotation::Left);
+        // none focused -> first becomes primary
+        assert!(monitors[0].is_primary);
+        assert!(!monitors[1].is_primary);
+    }
+
+    #[test]
+    fn parse_monitors_keeps_explicit_primary_and_handles_empty() {
+        assert!(parse_monitors(b"[]").unwrap().is_empty());
+        let json = br#"[{"name":"DP-1","description":"x","make":"","model":"X","width":1920,"height":1080,"refreshRate":60.0,"x":0,"y":0,"scale":1.0,"transform":0,"availableModes":[],"focused":true}]"#;
+        let m = parse_monitors(json).unwrap();
+        assert!(m[0].is_primary);
     }
 }

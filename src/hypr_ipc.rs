@@ -64,3 +64,31 @@ fn parse_event(line: &str) -> Option<HyprEvent> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_event_recognizes_monitor_add_remove() {
+        assert!(matches!(
+            parse_event("monitoradded>>HDMI-A-1"),
+            Some(HyprEvent::MonitorAdded(s)) if s == "HDMI-A-1"
+        ));
+        assert!(matches!(
+            parse_event("monitoraddedv2>>1,HDMI-A-1,Desc"),
+            Some(HyprEvent::MonitorAdded(s)) if s == "1,HDMI-A-1,Desc"
+        ));
+        assert!(matches!(
+            parse_event("monitorremoved>>eDP-1"),
+            Some(HyprEvent::MonitorRemoved(s)) if s == "eDP-1"
+        ));
+    }
+
+    #[test]
+    fn parse_event_ignores_unrelated_and_malformed() {
+        assert!(parse_event("workspace>>1").is_none()); // unrelated event
+        assert!(parse_event("noseparatorhere").is_none()); // missing ">>"
+        assert!(parse_event("").is_none());
+    }
+}

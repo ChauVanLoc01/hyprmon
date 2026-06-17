@@ -614,3 +614,320 @@ pub fn handle_mouse(
     }
     InputResult::Continue
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::monitor::MonitorConfig;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
+
+    const W: u16 = 140;
+    const H: u16 = 44;
+
+    static CTR: AtomicUsize = AtomicUsize::new(0);
+
+    fn temp_path() -> PathBuf {
+        let n = CTR.fetch_add(1, Ordering::Relaxed);
+        let mut p = std::env::temp_dir();
+        p.push(format!("hyprmon_input_{}_{n}.json", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    fn two_mon() -> App {
+        App::for_test(vec![
+            MonitorConfig::for_test("eDP-1", "N", "M", "1920x1080"),
+            MonitorConfig::for_test("HDMI-A-1", "MSI", "MP", "2560x1440"),
+        ])
+    }
+
+    fn temp_app() -> App {
+        let mut a = App::for_test(vec![]);
+        a.monitor_db.set_config_path(temp_path());
+        a
+    }
+
+    fn k(app: &mut App, code: KeyCode) -> InputResult {
+        handle_key(app, code, KeyModifiers::NONE)
+    }
+
+    fn regions() -> Vec<Rect> {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Percentage(38),
+                Constraint::Percentage(43),
+                Constraint::Length(3),
+            ])
+            .split(Rect::new(0, 0, W, H))
+            .to_vec()
+    }
+
+    #[test]
+    fn confirm_quit_dialog_keys() {
+        let mut a = two_mon();
+        a.dialog = DialogType::ConfirmQuit;
+        assert!(matches!(k(&mut a, KeyCode::Char('n')), InputResult::Continue));
+        assert!(matches!(a.dialog, DialogType::None));
+        a.dialog = DialogType::ConfirmQuit;
+        assert!(matches!(k(&mut a, KeyCode::Char('y')), InputResult::Quit));
+    }
+
+    #[test]
+    fn confirm_apply_yes_confirms_changes() {
+        let mut a = two_mon();
+        a.has_changes = true;
+        a.dialog = DialogType::ConfirmApply {
+            countdown: 5,
+            started: Instant::now(),
+        };
+        k(&mut a, KeyCode::Char('y'));
+        assert!(!a.has_changes);
+        assert!(matches!(a.dialog, DialogType::None));
+    }
+
+    #[test]
+    fn edit_dropdown_navigation_apply_and_close() {
+        let mut a = two_mon();
+        a.focus_panel = FocusPanel::Settings;
+        a.selected_setting = 2; // Scale: 5 options
+        a.dialog = DialogType::EditDropdown;
+        a.dropdown_selection = 0;
+        k(&mut a, KeyCode::Down);
+        assert_eq!(a.dropdown_selection, 1);
+        k(&mut a, KeyCode::Char('j'));
+        assert_eq!(a.dropdown_selection, 2);
+        k(&mut a, KeyCode::Up);
+        assert_eq!(a.dropdown_selection, 1);
+        k(&mut a, KeyCode::Char('k'));
+        assert_eq!(a.dropdown_selection, 0);
+        k(&mut a, KeyCode::Up); // bounded at 0
+        assert_eq!(a.dropdown_selection, 0);
+        a.dropdown_selection = 4;
+        k(&mut a, KeyCode::Down); // bounded at max (4)
+        assert_eq!(a.dropdown_selection, 4);
+        a.dropdown_selection = 2; // "150%"
+        k(&mut a, KeyCode::Enter);
+        assert!(matches!(a.dialog, DialogType::None));
+        assert_eq!(a.current_monitor().unwrap().scale, 1.5);
+        a.dialog = DialogType::EditDropdown;
+        k(&mut a, KeyCode::Esc);
+        assert!(matches!(a.dialog, DialogType::None));
+    }
+
+    #[test]
+    fn workspace_input_dialogs_create_rename_delete() {
+        let mut a = temp_app();
+        a.main_tab = MainTab::Saved;
+
+        a.dialog = DialogType::NewWorkspace;
+        k(&mut a, KeyCode::Char('W'));
+        k(&mut a, KeyCode::Char('s'));
+        assert_eq!(a.input_buffer, "Ws");
+        k(&mut a, KeyCode::Backspace);
+        assert_eq!(a.input_buffer, "W");
+        k(&mut a, KeyCode::Enter);
+        assert!(matches!(a.dialog, DialogType::None));
+        assert_eq!(a.monitor_db.workspaces.len(), 2);
+
+        a.dialog = DialogType::RenameWorkspace;
+        a.input_buffer.clear();
+        k(&mut a, KeyCode::Char('Z'));
+        k(&mut a, KeyCode::Enter);
+        assert_eq!(a.current_workspace_name(), "Z");
+
+        a.dialog = DialogType::NewWorkspace;
+        a.input_buffer = "abc".into();
+        k(&mut a, KeyCode::Esc);
+        assert!(a.input_buffer.is_empty());
+        assert!(matches!(a.dialog, DialogType::None));
+
+        a.dialog = DialogType::DeleteWorkspace;
+        k(&mut a, KeyCode::Char('n'));
+        assert!(matches!(a.dialog, DialogType::None));
+        let before = a.monitor_db.workspaces.len();
+        a.dialog = DialogType::DeleteWorkspace;
+        k(&mut a, KeyCode::Char('y'));
+        assert_eq!(a.monitor_db.workspaces.len(), before - 1);
+    }
+
+    #[test]
+    fn main_quit_and_tab_switch() {
+        let mut a = two_mon();
+        assert!(matches!(k(&mut a, KeyCode::Char('q')), InputResult::Quit));
+        a.has_changes = true;
+        k(&mut a, KeyCode::Char('q'));
+        assert!(matches!(a.dialog, DialogType::ConfirmQuit));
+        a.dialog = DialogType::None;
+        k(&mut a, KeyCode::Char('2'));
+        assert_eq!(a.main_tab, MainTab::Saved);
+        k(&mut a, KeyCode::Char('1'));
+        assert_eq!(a.main_tab, MainTab::Live);
+    }
+
+    #[test]
+    fn main_focus_and_monitor_navigation() {
+        let mut a = two_mon();
+        k(&mut a, KeyCode::Tab);
+        assert_eq!(a.focus_panel, FocusPanel::Settings);
+        k(&mut a, KeyCode::Tab);
+        assert_eq!(a.focus_panel, FocusPanel::Arrangement);
+        handle_key(&mut a, KeyCode::Tab, KeyModifiers::SHIFT);
+        assert_eq!(a.selected_monitor, 1);
+        k(&mut a, KeyCode::BackTab);
+        assert_eq!(a.selected_monitor, 0);
+
+        a.focus_panel = FocusPanel::Arrangement;
+        k(&mut a, KeyCode::Right);
+        assert_eq!(a.selected_monitor, 1);
+        k(&mut a, KeyCode::Left);
+        assert_eq!(a.selected_monitor, 0);
+        handle_key(&mut a, KeyCode::Right, KeyModifiers::SHIFT); // move right
+        assert_eq!(a.monitors[1].name, "eDP-1");
+        k(&mut a, KeyCode::Char('H'));
+        k(&mut a, KeyCode::Char('L'));
+        k(&mut a, KeyCode::Char('p'));
+
+        a.focus_panel = FocusPanel::Settings;
+        a.selected_setting = 0;
+        k(&mut a, KeyCode::Down);
+        assert_eq!(a.selected_setting, 1);
+        k(&mut a, KeyCode::Up);
+        assert_eq!(a.selected_setting, 0);
+        k(&mut a, KeyCode::Enter);
+        assert!(matches!(a.dialog, DialogType::EditDropdown));
+        a.dialog = DialogType::None;
+        a.selected_setting = 4;
+        k(&mut a, KeyCode::Char(' '));
+    }
+
+    #[test]
+    fn saved_tab_keys() {
+        let mut a = two_mon();
+        a.monitor_db.set_config_path(temp_path());
+        a.monitor_db.add_workspace("Two");
+        a.main_tab = MainTab::Saved;
+        a.saved_monitors = a.monitors.clone();
+
+        k(&mut a, KeyCode::Char(']'));
+        assert_eq!(a.selected_workspace, 1);
+        k(&mut a, KeyCode::Char('['));
+        assert_eq!(a.selected_workspace, 0);
+        k(&mut a, KeyCode::Char('n'));
+        assert!(matches!(a.dialog, DialogType::NewWorkspace));
+        a.dialog = DialogType::None;
+        k(&mut a, KeyCode::Char('d'));
+        assert!(matches!(a.dialog, DialogType::DeleteWorkspace));
+        a.dialog = DialogType::None;
+        k(&mut a, KeyCode::Char('r'));
+        assert!(matches!(a.dialog, DialogType::RenameWorkspace));
+        a.dialog = DialogType::None;
+
+        // Workspace navigation above refreshed saved_monitors to the (empty) saved
+        // workspace; repopulate to exercise the saved-panel cursor movement.
+        a.saved_monitors = a.monitors.clone();
+        a.focus_panel = FocusPanel::Arrangement;
+        k(&mut a, KeyCode::Right);
+        assert_eq!(a.saved_selected_monitor, 1);
+        k(&mut a, KeyCode::Left);
+        assert_eq!(a.saved_selected_monitor, 0);
+
+        a.focus_panel = FocusPanel::Settings;
+        k(&mut a, KeyCode::Down);
+        assert_eq!(a.saved_selected_setting, 1);
+        k(&mut a, KeyCode::Up);
+        assert_eq!(a.saved_selected_setting, 0);
+    }
+
+    #[test]
+    fn mouse_clicks_tabs_arrangement_settings() {
+        let mut a = two_mon();
+        let r = regions();
+        let tabs_row = r[0].y;
+        handle_mouse(&mut a, MouseEventKind::Down(MouseButton::Left), 120, tabs_row, W, H);
+        assert_eq!(a.main_tab, MainTab::Saved);
+        handle_mouse(&mut a, MouseEventKind::Down(MouseButton::Left), 5, tabs_row, W, H);
+        assert_eq!(a.main_tab, MainTab::Live);
+
+        let arr_row = r[1].y + 1;
+        handle_mouse(&mut a, MouseEventKind::Down(MouseButton::Left), 55, arr_row, W, H);
+        assert_eq!(a.focus_panel, FocusPanel::Arrangement);
+        assert_eq!(a.selected_monitor, 0);
+        assert!(matches!(a.drag_state, DragState::Dragging { .. }));
+
+        handle_mouse(&mut a, MouseEventKind::Drag(MouseButton::Left), 90, arr_row, W, H);
+        handle_mouse(&mut a, MouseEventKind::Up(MouseButton::Left), 90, arr_row, W, H);
+        assert!(matches!(a.drag_state, DragState::None));
+        assert!(a.has_changes);
+
+        let set = r[2];
+        handle_mouse(&mut a, MouseEventKind::Down(MouseButton::Left), 20, set.y + 2, W, H);
+        assert_eq!(a.focus_panel, FocusPanel::Settings);
+        assert_eq!(a.selected_setting, 0);
+        assert!(matches!(a.dialog, DialogType::EditDropdown));
+        a.dialog = DialogType::None;
+        handle_mouse(&mut a, MouseEventKind::Down(MouseButton::Left), 5, set.y + 7, W, H);
+        assert_eq!(a.selected_setting, 4);
+    }
+
+    #[test]
+    fn mouse_dropdown_select_scroll_and_confirm() {
+        let mut a = two_mon();
+        a.focus_panel = FocusPanel::Settings;
+        a.selected_setting = 2;
+        a.dialog = DialogType::EditDropdown;
+        let set = regions()[2];
+        let ddy = set.y + 5;
+        handle_mouse(&mut a, MouseEventKind::Down(MouseButton::Left), 25, ddy + 1, W, H);
+        assert!(matches!(a.dialog, DialogType::None));
+        assert_eq!(a.current_monitor().unwrap().scale, 1.0);
+
+        a.dialog = DialogType::EditDropdown;
+        a.dropdown_selection = 0;
+        handle_mouse(&mut a, MouseEventKind::ScrollDown, 0, 0, W, H);
+        assert_eq!(a.dropdown_selection, 1);
+        handle_mouse(&mut a, MouseEventKind::ScrollUp, 0, 0, W, H);
+        assert_eq!(a.dropdown_selection, 0);
+
+        a.dialog = DialogType::ConfirmQuit;
+        let (cx, cy) = (W as usize / 2, H as usize / 2);
+        let res = handle_mouse(
+            &mut a,
+            MouseEventKind::Down(MouseButton::Left),
+            (cx - 9) as u16,
+            cy as u16,
+            W,
+            H,
+        );
+        assert!(matches!(res, InputResult::Quit));
+        a.dialog = DialogType::ConfirmQuit;
+        handle_mouse(
+            &mut a,
+            MouseEventKind::Down(MouseButton::Left),
+            (cx + 1) as u16,
+            cy as u16,
+            W,
+            H,
+        );
+        assert!(matches!(a.dialog, DialogType::None));
+    }
+
+    #[test]
+    fn mouse_scroll_in_arrangement_and_settings() {
+        let mut a = two_mon();
+        let r = regions();
+        let (arr_row, set_row) = (r[1].y + 1, r[2].y + 1);
+        handle_mouse(&mut a, MouseEventKind::ScrollDown, 0, arr_row, W, H);
+        assert_eq!(a.selected_monitor, 1);
+        handle_mouse(&mut a, MouseEventKind::ScrollUp, 0, arr_row, W, H);
+        assert_eq!(a.selected_monitor, 0);
+        a.focus_panel = FocusPanel::Settings;
+        handle_mouse(&mut a, MouseEventKind::ScrollDown, 0, set_row, W, H);
+        assert_eq!(a.selected_setting, 1);
+        handle_mouse(&mut a, MouseEventKind::ScrollUp, 0, set_row, W, H);
+        assert_eq!(a.selected_setting, 0);
+    }
+}

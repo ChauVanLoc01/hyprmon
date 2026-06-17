@@ -422,13 +422,18 @@ impl App {
 
         let config_path = dirs::home_dir().unwrap().join(".config/hypr/monitors.conf");
 
-        if config_path.exists() {
+        let existing = if config_path.exists() {
             let backup = config_path.with_extension("conf.bak");
             fs::copy(&config_path, &backup)?;
-        }
+            fs::read_to_string(&config_path).unwrap_or_default()
+        } else {
+            String::new()
+        };
 
-        // Generate config from ALL saved monitors (not just connected ones)
-        let config = self.monitor_db.generate_full_config();
+        // Rewrite only hyprmon's managed block so any user-authored lines in
+        // monitors.conf survive regeneration.
+        let block = self.monitor_db.generate_full_config();
+        let config = crate::config::splice_managed_block(&existing, &block);
         fs::write(&config_path, &config)?;
 
         // Reload Hyprland to apply changes
@@ -504,5 +509,323 @@ impl App {
         self.refresh()?;
         self.message = "Monitor disconnected.".to_string();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+impl App {
+    /// Build an `App` around `monitors` with a fresh in-memory DB, bypassing the
+    /// `new()` path that shells out to `hyprctl`. Used by UI render tests.
+    pub fn for_test(monitors: Vec<MonitorConfig>) -> Self {
+        let db = MonitorDatabase::default();
+        let saved = db.get_workspace_monitors(db.active_workspace);
+        Self {
+            monitors: monitors.clone(),
+            original_monitors: monitors,
+            selected_monitor: 0,
+            focus_panel: FocusPanel::Arrangement,
+            selected_setting: 0,
+            saved_monitors: saved,
+            saved_selected_monitor: 0,
+            saved_selected_setting: 0,
+            selected_workspace: 0,
+            main_tab: MainTab::Live,
+            dialog: DialogType::None,
+            dropdown_selection: 0,
+            has_changes: false,
+            message: String::new(),
+            drag_state: DragState::None,
+            monitor_db: db,
+            input_buffer: String::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mc(name: &str, make: &str, model: &str, res: &str, x: i32) -> MonitorConfig {
+        MonitorConfig {
+            name: name.into(),
+            description: format!("{make} {model}"),
+            make: make.into(),
+            model: model.into(),
+            resolution: res.into(),
+            refresh_rate: 60.0,
+            position_x: x,
+            position_y: 0,
+            scale: 1.0,
+            rotation: Rotation::Normal,
+            is_primary: false,
+            available_modes: vec![
+                "1920x1080@60.00Hz".into(),
+                "1920x1080@144.00Hz".into(),
+                "2560x1440@60.00Hz".into(),
+            ],
+        }
+    }
+
+    fn app_with(monitors: Vec<MonitorConfig>, db: MonitorDatabase) -> App {
+        let aw = db.active_workspace;
+        let saved = db.get_workspace_monitors(aw);
+        App {
+            monitors: monitors.clone(),
+            original_monitors: monitors,
+            selected_monitor: 0,
+            focus_panel: FocusPanel::Arrangement,
+            selected_setting: 0,
+            saved_monitors: saved,
+            saved_selected_monitor: 0,
+            saved_selected_setting: 0,
+            selected_workspace: aw,
+            main_tab: MainTab::Live,
+            dialog: DialogType::None,
+            dropdown_selection: 0,
+            has_changes: false,
+            message: String::new(),
+            drag_state: DragState::None,
+            monitor_db: db,
+            input_buffer: String::new(),
+        }
+    }
+
+    #[test]
+    fn switch_tab_closes_dropdown_and_refreshes_saved() {
+        let mut app = app_with(vec![mc("eDP-1", "N", "M", "1920x1080", 0)], MonitorDatabase::default());
+        app.dialog = DialogType::EditDropdown;
+        app.switch_tab(MainTab::Saved);
+        assert_eq!(app.main_tab, MainTab::Saved);
+        assert!(matches!(app.dialog, DialogType::None));
+    }
+
+    #[test]
+    fn refresh_saved_monitors_clamps_selection() {
+        let mut app = app_with(vec![], MonitorDatabase::default());
+        app.saved_selected_monitor = 5;
+        app.refresh_saved_monitors();
+        assert_eq!(app.saved_selected_monitor, 0);
+    }
+
+    #[test]
+    fn workspace_navigation_respects_bounds() {
+        let mut db = MonitorDatabase::default();
+        db.add_workspace("Two");
+        let mut app = app_with(vec![], db);
+        app.next_workspace();
+        assert_eq!(app.selected_workspace, 1);
+        app.next_workspace(); // already last
+        assert_eq!(app.selected_workspace, 1);
+        app.prev_workspace();
+        assert_eq!(app.selected_workspace, 0);
+        app.prev_workspace(); // already first
+        assert_eq!(app.selected_workspace, 0);
+    }
+
+    #[test]
+    fn workspace_create_rename_delete_persists_to_temp() {
+        let mut p = std::env::temp_dir();
+        p.push(format!("hyprmon_app_ws_{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        let mut db = MonitorDatabase::default();
+        db.set_config_path(p.clone());
+        let mut app = app_with(vec![], db);
+
+        app.create_workspace("New");
+        assert_eq!(app.monitor_db.workspaces.len(), 2);
+        assert!(app.message.contains("New"));
+        assert!(p.exists());
+
+        app.rename_current_workspace("Renamed");
+        assert_eq!(app.current_workspace_name(), "Renamed");
+
+        assert!(app.delete_current_workspace());
+        assert!(!app.delete_current_workspace()); // cannot delete the last
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn current_workspace_name_out_of_range_is_empty() {
+        let mut app = app_with(vec![], MonitorDatabase::default());
+        app.selected_workspace = 99;
+        assert_eq!(app.current_workspace_name(), "");
+    }
+
+    #[test]
+    fn current_monitor_accessors() {
+        let mut app = app_with(vec![mc("eDP-1", "N", "M", "1920x1080", 0)], MonitorDatabase::default());
+        assert!(app.current_monitor().is_some());
+        app.current_monitor_mut().unwrap().scale = 2.0;
+        assert_eq!(app.current_monitor().unwrap().scale, 2.0);
+        app.selected_monitor = 99;
+        assert!(app.current_monitor().is_none());
+        assert!(app.current_monitor_mut().is_none());
+    }
+
+    #[test]
+    fn monitor_selection_wraps() {
+        let mut app = app_with(
+            vec![mc("A", "x", "x", "1920x1080", 0), mc("B", "y", "y", "1920x1080", 1920)],
+            MonitorDatabase::default(),
+        );
+        app.select_next_monitor();
+        assert_eq!(app.selected_monitor, 1);
+        app.select_next_monitor(); // wrap
+        assert_eq!(app.selected_monitor, 0);
+        app.select_prev_monitor(); // wrap back
+        assert_eq!(app.selected_monitor, 1);
+        app.select_prev_monitor();
+        assert_eq!(app.selected_monitor, 0);
+    }
+
+    #[test]
+    fn move_monitor_swaps_and_recalculates() {
+        let mut app = app_with(
+            vec![mc("A", "x", "x", "1920x1080", 0), mc("B", "y", "y", "1920x1080", 1920)],
+            MonitorDatabase::default(),
+        );
+        app.selected_monitor = 1;
+        app.move_monitor_left();
+        assert_eq!(app.monitors[0].name, "B");
+        assert_eq!(app.selected_monitor, 0);
+        assert!(app.has_changes);
+        app.move_monitor_left(); // already leftmost
+        assert_eq!(app.selected_monitor, 0);
+        app.move_monitor_right();
+        assert_eq!(app.monitors[1].name, "B");
+        assert_eq!(app.selected_monitor, 1);
+        app.move_monitor_right(); // already rightmost
+        assert_eq!(app.selected_monitor, 1);
+    }
+
+    #[test]
+    fn recalculate_positions_lays_edge_to_edge_with_scale() {
+        let mut app = app_with(
+            vec![mc("A", "x", "x", "1920x1080", 0), mc("B", "y", "y", "2560x1440", 0)],
+            MonitorDatabase::default(),
+        );
+        app.monitors[0].scale = 1.5; // logical width 1280
+        app.recalculate_positions();
+        assert_eq!(app.monitors[0].position_x, 0);
+        assert_eq!(app.monitors[1].position_x, 1280);
+    }
+
+    #[test]
+    fn set_and_toggle_primary() {
+        let mut app = app_with(
+            vec![mc("A", "x", "x", "1920x1080", 0), mc("B", "y", "y", "1920x1080", 1920)],
+            MonitorDatabase::default(),
+        );
+        app.set_primary(1);
+        assert!(app.monitors[1].is_primary && !app.monitors[0].is_primary);
+
+        app.selected_monitor = 1;
+        app.toggle_primary(); // currently primary -> hand off to the other
+        assert!(app.monitors[0].is_primary);
+        app.toggle_primary(); // selected(1) not primary -> becomes primary
+        assert!(app.monitors[1].is_primary);
+    }
+
+    #[test]
+    fn toggle_primary_single_monitor_stays_primary() {
+        let mut app = app_with(vec![mc("A", "x", "x", "1920x1080", 0)], MonitorDatabase::default());
+        app.set_primary(0);
+        app.toggle_primary();
+        assert!(app.monitors[0].is_primary);
+    }
+
+    #[test]
+    fn dropdown_options_per_field() {
+        let mut app = app_with(vec![mc("eDP-1", "N", "M", "1920x1080", 0)], MonitorDatabase::default());
+
+        app.selected_setting = 0; // Resolution -> highest pixel first
+        let res = app.get_dropdown_options();
+        assert_eq!(res.first().map(String::as_str), Some("2560x1440"));
+        assert!(res.contains(&"1920x1080".to_string()));
+
+        app.selected_setting = 1; // RefreshRate for 1920x1080 -> 144,60
+        let rates = app.get_dropdown_options();
+        assert_eq!(rates, vec!["144Hz", "60Hz"]);
+
+        app.selected_setting = 2; // Scale fixed list
+        assert_eq!(app.get_dropdown_options().len(), 5);
+
+        app.selected_setting = 3; // Rotation
+        assert_eq!(app.get_dropdown_options().len(), 4);
+
+        app.selected_setting = 4; // Primary has no dropdown
+        assert!(app.get_dropdown_options().is_empty());
+    }
+
+    #[test]
+    fn refresh_rate_options_fall_back_when_no_modes_match() {
+        let mut app = app_with(vec![mc("eDP-1", "N", "M", "3840x2160", 0)], MonitorDatabase::default());
+        app.selected_setting = 1; // no mode matches 3840x2160 -> fallback to current
+        assert_eq!(app.get_dropdown_options(), vec!["60Hz"]);
+    }
+
+    #[test]
+    fn apply_dropdown_sets_each_field() {
+        let mut app = app_with(vec![mc("eDP-1", "N", "M", "1920x1080", 0)], MonitorDatabase::default());
+
+        app.selected_setting = 2; // Scale -> "150%"
+        app.dropdown_selection = 2;
+        app.apply_dropdown_selection();
+        assert_eq!(app.current_monitor().unwrap().scale, 1.5);
+
+        app.selected_setting = 3; // Rotation -> Left
+        app.dropdown_selection = 1;
+        app.apply_dropdown_selection();
+        assert_eq!(app.current_monitor().unwrap().rotation, Rotation::Left);
+
+        app.selected_setting = 1; // RefreshRate -> 144
+        app.dropdown_selection = 0;
+        app.apply_dropdown_selection();
+        assert_eq!(app.current_monitor().unwrap().refresh_rate, 144.0);
+
+        app.selected_setting = 0; // Resolution -> top option
+        let top = app.get_dropdown_options()[0].clone();
+        app.dropdown_selection = 0;
+        app.apply_dropdown_selection();
+        assert_eq!(app.current_monitor().unwrap().resolution, top);
+    }
+
+    #[test]
+    fn apply_dropdown_out_of_range_is_noop() {
+        let mut app = app_with(vec![mc("eDP-1", "N", "M", "1920x1080", 0)], MonitorDatabase::default());
+        app.selected_setting = 2;
+        app.dropdown_selection = 99;
+        app.apply_dropdown_selection();
+        assert_eq!(app.current_monitor().unwrap().scale, 1.0); // unchanged
+    }
+
+    #[test]
+    fn generate_config_writes_lines_and_transform() {
+        let mut app = app_with(
+            vec![mc("eDP-1", "N", "M", "1920x1080", 0), mc("HDMI-A-1", "MSI", "MP", "2560x1440", 1920)],
+            MonitorDatabase::default(),
+        );
+        app.monitors[1].rotation = Rotation::Left;
+        let cfg = app.generate_config();
+        assert!(cfg.contains("monitor=eDP-1,"));
+        assert!(cfg.contains("desc:MSI MP"));
+        assert!(cfg.contains(",transform,1"));
+    }
+
+    #[test]
+    fn revert_and_confirm_changes() {
+        let mut app = app_with(vec![mc("A", "x", "x", "1920x1080", 0)], MonitorDatabase::default());
+        app.monitors[0].scale = 9.0;
+        app.has_changes = true;
+        app.revert_changes();
+        assert_eq!(app.monitors[0].scale, 1.0);
+        assert!(!app.has_changes);
+
+        app.monitors[0].scale = 3.0;
+        app.dialog = DialogType::ConfirmQuit;
+        app.confirm_changes();
+        assert_eq!(app.original_monitors[0].scale, 3.0);
+        assert!(!app.has_changes);
+        assert!(matches!(app.dialog, DialogType::None));
     }
 }
