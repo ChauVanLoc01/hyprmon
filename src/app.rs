@@ -431,8 +431,16 @@ impl App {
         };
 
         // Rewrite only hyprmon's managed block so any user-authored lines in
-        // monitors.conf survive regeneration.
-        let block = self.monitor_db.generate_full_config();
+        // monitors.conf survive regeneration. Pass the keys of the currently
+        // connected monitors so the generator packs only them into a gap-free
+        // row — a saved-but-absent monitor must not reserve coordinate space, or
+        // its empty slot traps the cursor between the monitors that remain.
+        let connected: std::collections::HashSet<String> = self
+            .monitors
+            .iter()
+            .map(MonitorDatabase::get_monitor_key)
+            .collect();
+        let block = self.monitor_db.generate_full_config(&connected);
         let config = crate::config::splice_managed_block(&existing, &block);
         fs::write(&config_path, &config)?;
 

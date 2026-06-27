@@ -1,6 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -240,7 +240,12 @@ impl MonitorDatabase {
     /// workspaces. The result is spliced between the hyprmon markers by
     /// [`splice_managed_block`]; it carries no file-level header of its own so it
     /// can be rewritten in place without accumulating duplicate headers.
-    pub fn generate_full_config(&self) -> String {
+    ///
+    /// `connected` holds the stable keys (see [`Self::get_monitor_key`]) of the
+    /// monitors physically present right now. Only these are packed into a
+    /// gap-free row; an empty set means "treat every saved monitor as connected"
+    /// (used by tests and as a safe fallback).
+    pub fn generate_full_config(&self, connected: &HashSet<String>) -> String {
         let mut config = String::new();
 
         // Collect all unique monitors across all workspaces (later workspaces win).
@@ -251,7 +256,7 @@ impl MonitorDatabase {
             }
         }
 
-        // Stable left-to-right order so the deconflict pass is deterministic
+        // Stable left-to-right order so the pack pass is deterministic
         // (HashMap iteration order is otherwise random across runs).
         let mut all_monitors: Vec<(String, SavedMonitor)> = merged.into_iter().collect();
         all_monitors.sort_by(|a, b| {
@@ -261,19 +266,32 @@ impl MonitorDatabase {
                 .then_with(|| a.0.cmp(&b.0))
         });
 
-        // Deconflict horizontally: any monitor whose left edge falls inside the
-        // running right edge is pushed to abut its neighbor. Hyprland's
-        // directional monitor focus/move (movecurrentworkspacetomonitor l/r,
-        // focusmonitor) silently fails ("Monitor not found") when connected
-        // monitors overlap, so overlapping geometry must never reach the conf.
-        let mut right_edge = i32::MIN;
-        for (_key, saved) in all_monitors.iter_mut() {
-            if saved.position_x < right_edge {
-                saved.position_x = right_edge;
+        // Pack the physically-connected monitors edge-to-edge from the origin,
+        // preserving their left-to-right order. This makes the laid-out geometry
+        // both gap-free AND overlap-free no matter which saved monitors are
+        // currently absent.
+        //
+        // Two failure modes this prevents — Hyprland positions ONLY connected
+        // monitors:
+        //   * Overlap -> directional focus/move (movecurrentworkspacetomonitor
+        //     l/r, focusmonitor) silently fails with "Monitor not found".
+        //   * A disconnected monitor whose stored coordinates sit between two
+        //     connected ones leaves an empty coordinate band — dead space the
+        //     cursor cannot cross. So a disconnected monitor must NOT advance the
+        //     running edge; its slot is skipped and its neighbors abut directly.
+        //
+        // Disconnected monitors keep their stored coordinates: their rule is
+        // inert (no matching panel) and never affects the live layout, but the
+        // entry is retained so a later hotplug still finds its saved res/scale.
+        // Logical width is scale- and rotation-aware, so fractional scales pack
+        // tightly with no fractional-pixel gap.
+        let treat_all_connected = connected.is_empty();
+        let mut running_x = 0i32;
+        for (key, saved) in all_monitors.iter_mut() {
+            if treat_all_connected || connected.contains(key) {
+                saved.position_x = running_x;
+                running_x = running_x.saturating_add(monitor_logical_width(saved));
             }
-            right_edge = saved
-                .position_x
-                .saturating_add(monitor_logical_width(saved));
         }
 
         for (key, saved) in &all_monitors {
@@ -441,6 +459,7 @@ fn monitor_logical_width(saved: &SavedMonitor) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     fn saved(res: &str, scale: f64, x: i32) -> SavedMonitor {
         SavedMonitor {
@@ -473,7 +492,7 @@ mod tests {
             ("eDP-1", saved("1920x1080", 1.0, 0)),
             ("desc:MSI", saved("2560x1440", 1.0, 1280)),
         ]);
-        let conf = db.generate_full_config();
+        let conf = db.generate_full_config(&HashSet::new());
         assert!(conf.contains("eDP-1,1920x1080@60.00,0x0,1"), "conf:\n{conf}");
         // MSI pushed to eDP's right edge -> no overlap.
         assert!(
@@ -489,7 +508,7 @@ mod tests {
             ("eDP-1", saved("1920x1080", 1.5, 0)),
             ("desc:MSI", saved("2560x1440", 1.0, 1280)),
         ]);
-        let conf = db.generate_full_config();
+        let conf = db.generate_full_config(&HashSet::new());
         assert!(
             conf.contains("eDP-1,1920x1080@60.00,0x0,1.50"),
             "conf:\n{conf}"
@@ -509,10 +528,54 @@ mod tests {
             ("eDP-1", left),
             ("desc:MSI", saved("2560x1440", 1.0, 500)),
         ]);
-        let conf = db.generate_full_config();
+        let conf = db.generate_full_config(&HashSet::new());
         // eDP footprint 1080 -> MSI must land at 1080, not overlap.
         assert!(
             conf.contains("desc:MSI,2560x1440@60.00,1080x0,1"),
+            "conf:\n{conf}"
+        );
+    }
+
+    #[test]
+    fn disconnected_middle_monitor_leaves_no_gap() {
+        // Saved row: eDP(0) -> MSI(1920) -> Yealink(4480). Only eDP + Yealink are
+        // physically connected; MSI is unplugged. Yealink must abut eDP's right
+        // edge instead of inheriting MSI's old slot, so the cursor can cross.
+        let db = db_with(vec![
+            ("eDP-1", saved("1920x1080", 1.0, 0)),
+            ("desc:MSI", saved("2560x1440", 1.0, 1920)),
+            ("desc:Yealink", saved("1920x1080", 1.0, 4480)),
+        ]);
+        let connected: HashSet<String> =
+            ["eDP-1".to_string(), "desc:Yealink".to_string()].into_iter().collect();
+        let conf = db.generate_full_config(&connected);
+        assert!(conf.contains("eDP-1,1920x1080@60.00,0x0,1"), "conf:\n{conf}");
+        // eDP logical width 1920 -> Yealink packs at 1920, NOT 4480.
+        assert!(
+            conf.contains("desc:Yealink,1920x1080@60.00,1920x0,1"),
+            "conf:\n{conf}"
+        );
+    }
+
+    #[test]
+    fn disconnected_middle_monitor_packs_with_fractional_scale() {
+        // Same gap scenario but eDP runs at 1.5 scale (logical width 1280). The
+        // connected neighbor must pack on the scaled width, with no fractional gap.
+        let db = db_with(vec![
+            ("eDP-1", saved("1920x1080", 1.5, 0)),
+            ("desc:MSI", saved("2560x1440", 1.0, 1920)),
+            ("desc:Yealink", saved("1920x1080", 1.0, 4480)),
+        ]);
+        let connected: HashSet<String> =
+            ["eDP-1".to_string(), "desc:Yealink".to_string()].into_iter().collect();
+        let conf = db.generate_full_config(&connected);
+        assert!(
+            conf.contains("eDP-1,1920x1080@60.00,0x0,1.50"),
+            "conf:\n{conf}"
+        );
+        // eDP logical width 1920/1.5 = 1280 -> Yealink packs at 1280.
+        assert!(
+            conf.contains("desc:Yealink,1920x1080@60.00,1280x0,1"),
             "conf:\n{conf}"
         );
     }
@@ -765,7 +828,7 @@ mod tests {
     fn generate_writes_transform_for_rotated_monitor() {
         let mut m = saved("1920x1080", 1.0, 0);
         m.rotation = 1;
-        let conf = db_with(vec![("eDP-1", m)]).generate_full_config();
+        let conf = db_with(vec![("eDP-1", m)]).generate_full_config(&HashSet::new());
         assert!(conf.contains(",transform,1"), "conf:\n{conf}");
     }
 
